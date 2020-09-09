@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional, Union, List, TYPE_CHECKING
+from typing import Dict, Optional, Union, List, TYPE_CHECKING, Tuple
 
 from slither.core.cfg.node import NodeType, link_nodes, insert_node, Node
 from slither.core.declarations.contract import Contract
@@ -92,6 +92,8 @@ class FunctionSolc:
         self._local_variables_parser: List[
             Union[LocalVariableSolc, LocalVariableInitFromTupleSolc]
         ] = []
+
+        self._loops: List[Tuple[NodeSolc, NodeSolc]] = []
 
     @property
     def underlying_function(self) -> Function:
@@ -382,6 +384,9 @@ class FunctionSolc:
         # WhileStatement = 'while' '(' Expression ')' Statement
 
         node_startWhile = self._new_node(NodeType.STARTLOOP, whilte_statement["src"])
+        node_endWhile = self._new_node(NodeType.ENDLOOP, whilte_statement["src"])
+
+        self._loops.append((node_startWhile, node_endWhile))
 
         if self.is_compact_ast:
             node_condition = self._new_node(NodeType.IFLOOP, whilte_statement["condition"]["src"])
@@ -394,13 +399,12 @@ class FunctionSolc:
             node_condition.add_unparsed_expression(expression)
             statement = self._parse_statement(children[1], node_condition)
 
-        node_endWhile = self._new_node(NodeType.ENDLOOP, whilte_statement["src"])
-
         link_underlying_nodes(node, node_startWhile)
         link_underlying_nodes(node_startWhile, node_condition)
         link_underlying_nodes(statement, node_condition)
         link_underlying_nodes(node_condition, node_endWhile)
 
+        self._loops.pop()
         return node_endWhile
 
     def _parse_for_compact_ast(self, statement: Dict, node: NodeSolc) -> NodeSolc:
@@ -411,6 +415,7 @@ class FunctionSolc:
 
         node_startLoop = self._new_node(NodeType.STARTLOOP, statement["src"])
         node_endLoop = self._new_node(NodeType.ENDLOOP, statement["src"])
+        self._loops.append((node_startLoop, node_endLoop))
 
         if init_expression:
             node_init_expression = self._parse_statement(init_expression, node)
@@ -448,6 +453,7 @@ class FunctionSolc:
             elif node_LoopExpression:
                 link_underlying_nodes(node_LoopExpression, node_endLoop)
 
+        self._loops.pop()
         return node_endLoop
 
     def _parse_for(self, statement: Dict, node: NodeSolc) -> NodeSolc:
@@ -491,6 +497,7 @@ class FunctionSolc:
 
         node_startLoop = self._new_node(NodeType.STARTLOOP, statement["src"])
         node_endLoop = self._new_node(NodeType.ENDLOOP, statement["src"])
+        self._loops.append((node_startLoop, node_endLoop))
 
         children = statement[self.get_children("children")]
 
@@ -549,11 +556,15 @@ class FunctionSolc:
 
         link_underlying_nodes(node_LoopExpression, node_condition)
 
+        self._loops.pop()
         return node_endLoop
 
     def _parse_dowhile(self, do_while_statement: Dict, node: NodeSolc) -> NodeSolc:
 
         node_startDoWhile = self._new_node(NodeType.STARTLOOP, do_while_statement["src"])
+        node_endDoWhile = self._new_node(NodeType.ENDLOOP, do_while_statement["src"])
+
+        self._loops.append((node_startDoWhile, node_endDoWhile))
 
         if self.is_compact_ast:
             node_condition = self._new_node(NodeType.IFLOOP, do_while_statement["condition"]["src"])
@@ -580,6 +591,8 @@ class FunctionSolc:
             )
         link_underlying_nodes(statement, node_condition)
         link_underlying_nodes(node_condition, node_endDoWhile)
+
+        self._loops.pop()
         return node_endDoWhile
 
     def _parse_try_catch(self, statement: Dict, node: NodeSolc) -> NodeSolc:
@@ -859,10 +872,12 @@ class FunctionSolc:
         # The is fixed later
         elif name == "Continue":
             continue_node = self._new_node(NodeType.CONTINUE, statement["src"])
+            link_underlying_nodes(continue_node, self._loops[-1][0])
             link_underlying_nodes(node, continue_node)
             node = continue_node
         elif name == "Break":
             break_node = self._new_node(NodeType.BREAK, statement["src"])
+            link_underlying_nodes(break_node, self._loops[-1][1])
             link_underlying_nodes(node, break_node)
             node = break_node
         elif name == "Return":
@@ -959,70 +974,6 @@ class FunctionSolc:
     # region Loops
     ###################################################################################
     ###################################################################################
-
-    def _find_end_loop(self, node: Node, visited: List[Node], counter: int) -> Optional[Node]:
-        # counter allows to explore nested loop
-        if node in visited:
-            return None
-
-        if node.type == NodeType.ENDLOOP:
-            if counter == 0:
-                return node
-            counter -= 1
-
-        # nested loop
-        if node.type == NodeType.STARTLOOP:
-            counter += 1
-
-        visited = visited + [node]
-        for son in node.sons:
-            ret = self._find_end_loop(son, visited, counter)
-            if ret:
-                return ret
-
-        return None
-
-    def _find_start_loop(self, node: Node, visited: List[Node]) -> Optional[Node]:
-        if node in visited:
-            return None
-
-        if node.type == NodeType.STARTLOOP:
-            return node
-
-        visited = visited + [node]
-        for father in node.fathers:
-            ret = self._find_start_loop(father, visited)
-            if ret:
-                return ret
-
-        return None
-
-    def _fix_break_node(self, node: Node):
-        end_node = self._find_end_loop(node, [], 0)
-
-        if not end_node:
-            # If there is not end condition on the loop
-            # The exploration will reach a STARTLOOP before reaching the endloop
-            # We start with -1 as counter to catch this corner case
-            end_node = self._find_end_loop(node, [], -1)
-            if not end_node:
-                raise ParsingError("Break in no-loop context {}".format(node.function))
-
-        for son in node.sons:
-            son.remove_father(node)
-        node.set_sons([end_node])
-        end_node.add_father(node)
-
-    def _fix_continue_node(self, node: Node):
-        start_node = self._find_start_loop(node, [])
-
-        if not start_node:
-            raise ParsingError("Continue in no-loop context {}".format(node.node_id))
-
-        for son in node.sons:
-            son.remove_father(node)
-        node.set_sons([start_node])
-        start_node.add_father(node)
 
     def _fix_try(self, node: Node):
         end_node = next((son for son in node.sons if son.type != NodeType.CATCH), None)
@@ -1146,9 +1097,15 @@ class FunctionSolc:
                     son.remove_father(node)
                 node.set_sons([])
             if node.type in [NodeType.BREAK]:
-                self._fix_break_node(node)
+                for son in node.sons:
+                    if son.type != NodeType.ENDLOOP:
+                        son.remove_father(node)
+                        node.remove_son(son)
             if node.type in [NodeType.CONTINUE]:
-                self._fix_continue_node(node)
+                for son in node.sons:
+                    if son.type != NodeType.STARTLOOP:
+                        son.remove_father(node)
+                        node.remove_son(son)
             if node.type in [NodeType.TRY]:
                 self._fix_try(node)
 
