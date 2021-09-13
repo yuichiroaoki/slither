@@ -22,11 +22,14 @@ jobs:
         uses: actions/setup-python@v2
         with:
           python-version: ${{ matrix.python-version }}
+
       - name: Install dependencies
         run: |
           sudo snap install solc
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install slither-analyzer solc-select
+          solc-select install all
+          solc-select use 0.6.0
 
       - name: Summary of static ananlysis
         run: |
