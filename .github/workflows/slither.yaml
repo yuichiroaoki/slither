@@ -1,0 +1,43 @@
+name: Static Analysis
+on:
+  push:
+    branches: [ dev ]
+    paths:
+      - '.github/workflows/slither.yaml'
+      - "**.py"
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9]
+        node-version: [14.x]
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          sudo snap install solc
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Summary of static ananlysis
+        run: |
+          echo "Running slither"
+          slither examples/slither-prop --print human-summary
+
+      - name: Save the result as a SARIF json file
+            #  slither . --json - --sarif results.sarif
+        run: |
+            slither examples/slither-prop --sarif test.sarif
+      - uses: github/codeql-action/upload-sarif@v1
+        with:
+          # Path to SARIF file relative to the root of the repository
+          sarif_file: test.sarif
